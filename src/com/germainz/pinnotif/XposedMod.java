@@ -7,9 +7,9 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.res.XModuleResources;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
-import android.service.notification.StatusBarNotification;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
@@ -25,10 +25,12 @@ import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
+import static de.robv.android.xposed.XposedBridge.hookAllMethods;
 import static de.robv.android.xposed.XposedHelpers.callMethod;
 import static de.robv.android.xposed.XposedHelpers.findAndHookConstructor;
 import static de.robv.android.xposed.XposedHelpers.findAndHookMethod;
 import static de.robv.android.xposed.XposedHelpers.findClass;
+import static de.robv.android.xposed.XposedHelpers.getIntField;
 import static de.robv.android.xposed.XposedHelpers.getObjectField;
 
 public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit {
@@ -39,12 +41,33 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
     private static final String INTENT_BROADCAST_ACTION = "com.germainz.pinnotif.BROADCAST";
     // TODO: ICS compatibility
 
+    private static final int PKG_INDEX = 0;
+    private static final int TAG_INDEX;
+    private static final int ID_INDEX;
+    private static final int NOTIFICATION_INDEX;
+    private static final int USERID_INDEX;
+
+    static {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+            TAG_INDEX = 2;
+            ID_INDEX = 3;
+            NOTIFICATION_INDEX = 4;
+            USERID_INDEX = 6;
+        } else {
+            TAG_INDEX = 1;
+            ID_INDEX = 2;
+            NOTIFICATION_INDEX = 3;
+            USERID_INDEX = 5;
+        }
+    }
+
     @Override
     public void initZygote(StartupParam startupParam) throws Throwable {
         XModuleResources res = XModuleResources.createInstance(startupParam.modulePath, null);
         TEXT_PIN = res.getString(R.string.text_pin);
         TEXT_UNPIN = res.getString(R.string.text_unpin);
         TEXT_APP_INFO = res.getString(R.string.text_app_info);
+
     }
 
     @Override
@@ -56,9 +79,10 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
     }
 
     private void loadNotifManagerServiceHooks(LoadPackageParam loadPackageParam) {
-        findAndHookConstructor("com.android.server.NotificationManagerService", loadPackageParam.classLoader,
-                Context.class, "com.android.server.StatusBarManagerService",
-                "com.android.server.LightsService",
+        Class notificationManagerServiceClass = findClass("com.android.server.NotificationManagerService",
+                loadPackageParam.classLoader);
+        findAndHookConstructor(notificationManagerServiceClass, Context.class,
+                "com.android.server.StatusBarManagerService", "com.android.server.LightsService",
                 new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(final MethodHookParam param) throws Throwable {
@@ -70,10 +94,19 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
                                 String basePkg = bundle.getString("basePkg");
                                 String tag = bundle.getString("tag");
                                 int id = bundle.getInt("id");
-                                int userId = bundle.getInt("userId");
                                 Notification notification = bundle.getParcelable("notification");
-                                callMethod(param.thisObject, "enqueueNotificationWithTag", pkg, basePkg,
-                                        tag, id, notification, new int[1], userId);
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+                                    int userId = bundle.getInt("userId");
+                                    callMethod(param.thisObject, "enqueueNotificationWithTag", pkg, basePkg, tag,
+                                            id, notification, new int[1], userId);
+                                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
+                                    int userId = bundle.getInt("userId");
+                                    callMethod(param.thisObject, "enqueueNotificationWithTag", pkg, tag, id,
+                                            notification, new int[1], userId);
+                                } else {
+                                    callMethod(param.thisObject, "enqueueNotificationWithTag", pkg, tag, id,
+                                            notification, new int[1]);
+                                }
                             }
                         };
                         Context context = (Context) param.args[0];
@@ -84,22 +117,28 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
                 }
         );
 
-        findAndHookMethod("com.android.server.NotificationManagerService", loadPackageParam.classLoader,
-                "enqueueNotificationInternal", String.class, String.class, int.class, int.class,
-                String.class, int.class, Notification.class, int[].class, int.class,
-                new XC_MethodHook() {
+        hookAllMethods(notificationManagerServiceClass, "enqueueNotificationWithTag", new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(final MethodHookParam param) throws Throwable {
-                        int index = (Integer) callMethod(param.thisObject, "indexOfNotificationLocked",
-                                param.args[0], param.args[4], param.args[5], param.args[8]);
+                        int index;
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1)
+                            index = (Integer) callMethod(param.thisObject, "indexOfNotificationLocked",
+                                    param.args[PKG_INDEX], param.args[TAG_INDEX], param.args[ID_INDEX], param.args[USERID_INDEX]);
+                        else
+                            index = (Integer) callMethod(param.thisObject, "indexOfNotificationLocked",
+                                    param.args[PKG_INDEX], param.args[TAG_INDEX], param.args[ID_INDEX]);
+
+                        Notification n = (Notification) param.args[NOTIFICATION_INDEX];
                         if (index >= 0) {
                             ArrayList<Object> notificationList = (ArrayList<Object>) getObjectField(param.thisObject, "mNotificationList");
                             Object notificationRecord = notificationList.get(index);
-                            StatusBarNotification oldSbn = ((StatusBarNotification) getObjectField(notificationRecord, "sbn"));
-                            Notification n = (Notification) param.args[6];
-                            if (oldSbn.getNotification().extras.containsKey("pinnotif") && !n.extras.containsKey("pinnotif")) {
-                                n.extras.putInt("pinnotif", 0);
-                                if (oldSbn.isClearable())
+                            Object oldSbn = getObjectField(notificationRecord, "sbn");
+                            Bundle nExtras = (Bundle) getObjectField(n, "extras");
+                            Notification oldSbnNotification = (Notification) getObjectField(oldSbn, "notification");
+                            Bundle oldSbnExtras = (Bundle) getObjectField(oldSbnNotification, "extras");
+                            if (oldSbnExtras.containsKey("pinnotif") && !nExtras.containsKey("pinnotif")) {
+                                nExtras.putInt("pinnotif", 0);
+                                if (isClearable(oldSbnNotification))
                                     n.flags &= ~Notification.FLAG_NO_CLEAR;
                                 else
                                     n.flags |= Notification.FLAG_NO_CLEAR;
@@ -139,7 +178,7 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
                                 try {
                                     final Object entry = v.getTag();
 
-                                    final StatusBarNotification sbn = (StatusBarNotification) XposedHelpers.getObjectField(entry, "notification");
+                                    final Object sbn = XposedHelpers.getObjectField(entry, "notification");
                                     final String packageNameF = (String) XposedHelpers.getObjectField(sbn, "pkg");
                                     final Notification n = (Notification) XposedHelpers.getObjectField(sbn, "notification");
 
@@ -148,8 +187,8 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
 
                                     final PopupMenu popup = new PopupMenu(mContext, v);
                                     popup.getMenu().add(TEXT_APP_INFO);
-                                    if (!sbn.isOngoing())
-                                        popup.getMenu().add(sbn.isClearable() ? TEXT_PIN : TEXT_UNPIN);
+                                    if (!isOngoing(n))
+                                        popup.getMenu().add(isClearable(n) ? TEXT_PIN : TEXT_UNPIN);
                                     popup.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
                                         public boolean onMenuItemClick(MenuItem item) {
                                             if (item.getTitle().equals(TEXT_APP_INFO)) {
@@ -189,15 +228,17 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
 
     }
 
-    private static void sendBroadcast(Context context, StatusBarNotification sbn, Notification n) {
+    private static void sendBroadcast(Context context, Object sbn, Notification n) {
         Intent intent = new Intent(INTENT_BROADCAST_ACTION);
-        intent.putExtra("pkg", sbn.getPackageName());
+        intent.putExtra("pkg", (String) getObjectField(sbn, "pkg"));
         intent.putExtra("basePkg", context.getPackageName());
-        intent.putExtra("tag", sbn.getTag());
-        intent.putExtra("id", sbn.getId());
-        intent.putExtra("userId", sbn.getUserId());
+        intent.putExtra("tag", (String) getObjectField(sbn, "tag"));
+        intent.putExtra("id", getIntField(sbn, "id"));
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1)
+            intent.putExtra("userId", (Integer) callMethod(sbn, "getUserId"));
         intent.putExtra("notification", n);
-        n.extras.putInt("pinnotif", 0);
+        Bundle nExtras = (Bundle) getObjectField(n, "extras");
+        nExtras.putInt("pinnotif", 0);
         context.sendBroadcast(intent);
     }
 
@@ -215,5 +256,13 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
         );
     }
 
+    public static boolean isClearable(Notification notification) {
+        return ((notification.flags & Notification.FLAG_ONGOING_EVENT) == 0)
+                && ((notification.flags & Notification.FLAG_NO_CLEAR) == 0);
+    }
+
+    public static boolean isOngoing(Notification notification) {
+        return (notification.flags & Notification.FLAG_ONGOING_EVENT) != 0;
+    }
 }
 
