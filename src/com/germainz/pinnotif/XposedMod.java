@@ -39,6 +39,8 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
     private static String TEXT_UNPIN;
     private static String TEXT_APP_INFO;
     private static final String INTENT_BROADCAST_ACTION = "com.germainz.pinnotif.BROADCAST";
+    private static final String EXTRA_PINNOTIF_MARKER = "com.germainz.pinnotif";
+    private static final String EXTRA_NOTIFICATION_FLAGS = "com.germainz.pinnotif.notification_flags";
     // TODO: ICS compatibility
 
     private static final int PKG_INDEX = 0;
@@ -94,13 +96,38 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
                                 String basePkg = bundle.getString("basePkg");
                                 String tag = bundle.getString("tag");
                                 int id = bundle.getInt("id");
-                                Notification notification = bundle.getParcelable("notification");
+
+                                int userId = 0;
+                                int index;
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
+                                    userId = bundle.getInt("userId");
+                                    // TODO: make a function that calls the appropriate indexOfNotificationLocked,
+                                    // TODO:    and use it here and below (in the enqueueNotificationWithTag hook)
+                                    index = (Integer) callMethod(param.thisObject, "indexOfNotificationLocked",
+                                            pkg, tag, id, userId);
+                                } else {
+                                    index = (Integer) callMethod(param.thisObject, "indexOfNotificationLocked",
+                                            pkg, tag, id);
+                                }
+
+                                // TODO: move to Notification getNotification(Object thisObject) method?
+                                ArrayList<Object> notificationList = (ArrayList<Object>) getObjectField(param.thisObject, "mNotificationList");
+                                Object notificationRecord = notificationList.get(index);
+                                Notification notification;
                                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
-                                    int userId = bundle.getInt("userId");
+                                    Object oldSbn = getObjectField(notificationRecord, "sbn");
+                                    notification = (Notification) getObjectField(oldSbn, "notification");
+                                } else {
+                                    notification = (Notification) getObjectField(notificationRecord, "notification");
+                                }
+                                Bundle nExtras = (Bundle) getObjectField(notification, "extras");
+                                notification.flags = bundle.getInt(EXTRA_NOTIFICATION_FLAGS);
+                                nExtras.putInt(EXTRA_PINNOTIF_MARKER, 0);
+
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
                                     callMethod(param.thisObject, "enqueueNotificationWithTag", pkg, basePkg, tag,
                                             id, notification, new int[1], userId);
                                 } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
-                                    int userId = bundle.getInt("userId");
                                     callMethod(param.thisObject, "enqueueNotificationWithTag", pkg, tag, id,
                                             notification, new int[1], userId);
                                 } else {
@@ -108,7 +135,9 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
                                             notification, new int[1]);
                                 }
                             }
+
                         };
+
                         Context context = (Context) param.args[0];
                         IntentFilter filter = new IntentFilter();
                         filter.addAction(INTENT_BROADCAST_ACTION);
@@ -120,24 +149,35 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
         hookAllMethods(notificationManagerServiceClass, "enqueueNotificationWithTag", new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(final MethodHookParam param) throws Throwable {
+
+                        Notification n = (Notification) param.args[NOTIFICATION_INDEX];
+                        Bundle nExtras = (Bundle) getObjectField(n, "extras");
+                        if (nExtras.containsKey(EXTRA_PINNOTIF_MARKER))
+                            return;
+
                         int index;
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1)
                             index = (Integer) callMethod(param.thisObject, "indexOfNotificationLocked",
-                                    param.args[PKG_INDEX], param.args[TAG_INDEX], param.args[ID_INDEX], param.args[USERID_INDEX]);
+                                    param.args[PKG_INDEX], param.args[TAG_INDEX], param.args[ID_INDEX],
+                                    param.args[USERID_INDEX]);
                         else
                             index = (Integer) callMethod(param.thisObject, "indexOfNotificationLocked",
                                     param.args[PKG_INDEX], param.args[TAG_INDEX], param.args[ID_INDEX]);
 
-                        Notification n = (Notification) param.args[NOTIFICATION_INDEX];
                         if (index >= 0) {
                             ArrayList<Object> notificationList = (ArrayList<Object>) getObjectField(param.thisObject, "mNotificationList");
                             Object notificationRecord = notificationList.get(index);
-                            Object oldSbn = getObjectField(notificationRecord, "sbn");
-                            Bundle nExtras = (Bundle) getObjectField(n, "extras");
-                            Notification oldSbnNotification = (Notification) getObjectField(oldSbn, "notification");
+                            Notification oldSbnNotification;
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+                                Object oldSbn = getObjectField(notificationRecord, "sbn");
+                                oldSbnNotification = (Notification) getObjectField(oldSbn, "notification");
+                            } else {
+                                oldSbnNotification = (Notification) getObjectField(notificationRecord, "notification");
+                            }
+
                             Bundle oldSbnExtras = (Bundle) getObjectField(oldSbnNotification, "extras");
-                            if (oldSbnExtras.containsKey("pinnotif") && !nExtras.containsKey("pinnotif")) {
-                                nExtras.putInt("pinnotif", 0);
+                            if (oldSbnExtras.containsKey(EXTRA_PINNOTIF_MARKER)) {
+                                nExtras.putInt(EXTRA_PINNOTIF_MARKER, 0);
                                 if (isClearable(oldSbnNotification))
                                     n.flags &= ~Notification.FLAG_NO_CLEAR;
                                 else
@@ -236,9 +276,7 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
         intent.putExtra("id", getIntField(sbn, "id"));
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1)
             intent.putExtra("userId", (Integer) callMethod(sbn, "getUserId"));
-        intent.putExtra("notification", n);
-        Bundle nExtras = (Bundle) getObjectField(n, "extras");
-        nExtras.putInt("pinnotif", 0);
+        intent.putExtra(EXTRA_NOTIFICATION_FLAGS, n.flags);
         context.sendBroadcast(intent);
     }
 
