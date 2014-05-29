@@ -22,7 +22,6 @@ import de.robv.android.xposed.IXposedHookZygoteInit;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XC_MethodReplacement;
 import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
 import static de.robv.android.xposed.XposedBridge.hookAllMethods;
@@ -32,6 +31,7 @@ import static de.robv.android.xposed.XposedHelpers.findAndHookMethod;
 import static de.robv.android.xposed.XposedHelpers.findClass;
 import static de.robv.android.xposed.XposedHelpers.getIntField;
 import static de.robv.android.xposed.XposedHelpers.getObjectField;
+import static de.robv.android.xposed.XposedHelpers.setObjectField;
 
 public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit {
 
@@ -75,7 +75,7 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
     @Override
     public void handleLoadPackage(LoadPackageParam lpparam) throws Throwable {
         if (lpparam.packageName.equals("com.android.systemui"))
-            loadNewHooks(lpparam);
+            loadBaseStatusBarHooks(lpparam);
         else if (lpparam.packageName.equals("android"))
             loadNotifManagerServiceHooks(lpparam);
     }
@@ -93,40 +93,31 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
                             public void onReceive(Context context, Intent intent) {
                                 Bundle bundle = intent.getExtras();
                                 String pkg = bundle.getString("pkg");
-                                String basePkg = bundle.getString("basePkg");
                                 String tag = bundle.getString("tag");
                                 int id = bundle.getInt("id");
 
                                 int userId = 0;
-                                int index;
-                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1)
                                     userId = bundle.getInt("userId");
-                                    // TODO: make a function that calls the appropriate indexOfNotificationLocked,
-                                    // TODO:    and use it here and below (in the enqueueNotificationWithTag hook)
-                                    index = (Integer) callMethod(param.thisObject, "indexOfNotificationLocked",
-                                            pkg, tag, id, userId);
-                                } else {
-                                    index = (Integer) callMethod(param.thisObject, "indexOfNotificationLocked",
-                                            pkg, tag, id);
-                                }
+                                int index = getNotificationIndex(param.thisObject, pkg, tag, id, userId);
 
-                                // TODO: move to Notification getNotification(Object thisObject) method?
-                                ArrayList<Object> notificationList = (ArrayList<Object>) getObjectField(param.thisObject, "mNotificationList");
-                                Object notificationRecord = notificationList.get(index);
-                                Notification notification;
-                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
-                                    Object oldSbn = getObjectField(notificationRecord, "sbn");
-                                    notification = (Notification) getObjectField(oldSbn, "notification");
-                                } else {
-                                    notification = (Notification) getObjectField(notificationRecord, "notification");
-                                }
+                                // Each notification is associated with a package, and has an id.
+                                // To update a certain notification, we send updated notification
+                                // using the same id.
+                                // Since we only want to update the flags, we get the current
+                                // (non-updated) notification and set the flags we want for it.
+                                // Get the current notification
+                                Notification notification = getNotification(param.thisObject, index);
                                 Bundle nExtras = (Bundle) getObjectField(notification, "extras");
                                 notification.flags = bundle.getInt(EXTRA_NOTIFICATION_FLAGS);
                                 if (nExtras == null)
                                     nExtras = new Bundle();
                                 nExtras.putInt(EXTRA_PINNOTIF_MARKER, 0);
 
+                                // We then send it, which will cause it to update and use the new
+                                // flags.
                                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+                                    String basePkg = bundle.getString("basePkg");
                                     callMethod(param.thisObject, "enqueueNotificationWithTag", pkg, basePkg, tag,
                                             id, notification, new int[1], userId);
                                 } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
@@ -154,30 +145,22 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
 
                         Notification n = (Notification) param.args[NOTIFICATION_INDEX];
                         Bundle nExtras = (Bundle) getObjectField(n, "extras");
+                        // This is an update caused by our module. Nothing to do here.
                         if (nExtras != null && nExtras.containsKey(EXTRA_PINNOTIF_MARKER))
                             return;
 
-                        int index;
+                        Object userId = null;
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1)
-                            index = (Integer) callMethod(param.thisObject, "indexOfNotificationLocked",
-                                    param.args[PKG_INDEX], param.args[TAG_INDEX], param.args[ID_INDEX],
-                                    param.args[USERID_INDEX]);
-                        else
-                            index = (Integer) callMethod(param.thisObject, "indexOfNotificationLocked",
-                                    param.args[PKG_INDEX], param.args[TAG_INDEX], param.args[ID_INDEX]);
+                            userId = param.args[USERID_INDEX];
+                        int index = getNotificationIndex(param.thisObject, param.args[PKG_INDEX], param.args[TAG_INDEX],
+                                param.args[ID_INDEX], userId);
 
+                        // This is not a new notification, but an update. Check if we had set custom
+                        // flags, and if so, restore them.
                         if (index >= 0) {
-                            ArrayList<Object> notificationList = (ArrayList<Object>) getObjectField(param.thisObject, "mNotificationList");
-                            Object notificationRecord = notificationList.get(index);
-                            Notification oldSbnNotification;
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
-                                Object oldSbn = getObjectField(notificationRecord, "sbn");
-                                oldSbnNotification = (Notification) getObjectField(oldSbn, "notification");
-                            } else {
-                                oldSbnNotification = (Notification) getObjectField(notificationRecord, "notification");
-                            }
-
+                            Notification oldSbnNotification = getNotification(param.thisObject, index);
                             Bundle oldSbnExtras = (Bundle) getObjectField(oldSbnNotification, "extras");
+                            // If the marker is set, then we previously set custom flags… restore them
                             if (oldSbnExtras.containsKey(EXTRA_PINNOTIF_MARKER)) {
                                 nExtras.putInt(EXTRA_PINNOTIF_MARKER, 0);
                                 if (isClearable(oldSbnNotification))
@@ -191,7 +174,7 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
         );
     }
 
-    private static void loadNewHooks(final LoadPackageParam lpp) {
+    private static void loadBaseStatusBarHooks(final LoadPackageParam lpp) {
         Class<?> baseStatusBar = findClass("com.android.systemui.statusbar.BaseStatusBar",
                 lpp.classLoader);
         try {
@@ -211,18 +194,16 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
         findAndHookMethod(baseStatusBar, "getNotificationLongClicker",
                 new XC_MethodReplacement() {
                     protected Object replaceHookedMethod(final MethodHookParam param) throws Throwable {
-                        final Object thiz = param.thisObject;
-                        final Context mContext = (Context) XposedHelpers.findField(
-                                thiz.getClass(), "mContext").get(thiz);
+                        final Context mContext = (Context) getObjectField(param.thisObject, "mContext");
                         return new View.OnLongClickListener() {
                             @Override
                             public boolean onLongClick(final View v) {
                                 try {
                                     final Object entry = v.getTag();
 
-                                    final Object sbn = XposedHelpers.getObjectField(entry, "notification");
-                                    final String packageNameF = (String) XposedHelpers.getObjectField(sbn, "pkg");
-                                    final Notification n = (Notification) XposedHelpers.getObjectField(sbn, "notification");
+                                    final Object sbn = getObjectField(entry, "notification");
+                                    final String packageNameF = (String) getObjectField(sbn, "pkg");
+                                    final Notification n = (Notification) getObjectField(sbn, "notification");
 
                                     if (packageNameF == null) return false;
                                     if (v.getWindowToken() == null) return false;
@@ -288,9 +269,9 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
                 new XC_MethodHook() {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         final Object entry = param.args[0];
-                        View newRow = (View) XposedHelpers.getObjectField(entry, "row");
+                        View newRow = (View) getObjectField(entry, "row");
                         newRow.setTag(entry);
-                        XposedHelpers.setObjectField(entry, "row", newRow);
+                        setObjectField(entry, "row", newRow);
                     }
                 }
         );
@@ -303,6 +284,24 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
 
     public static boolean isOngoing(Notification notification) {
         return (notification.flags & Notification.FLAG_ONGOING_EVENT) != 0;
+    }
+
+    public static int getNotificationIndex(Object object, Object pkg, Object tag, Object id, Object userId) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1)
+            return (Integer) callMethod(object, "indexOfNotificationLocked", pkg, tag, id, userId);
+        else
+            return (Integer) callMethod(object, "indexOfNotificationLocked", pkg, tag, id);
+    }
+
+    public static Notification getNotification(Object object, int index) {
+        ArrayList<Object> notificationList = (ArrayList<Object>) getObjectField(object, "mNotificationList");
+        Object notificationRecord = notificationList.get(index);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+            Object oldSbn = getObjectField(notificationRecord, "sbn");
+            return (Notification) getObjectField(oldSbn, "notification");
+        } else {
+            return (Notification) getObjectField(notificationRecord, "notification");
+        }
     }
 }
 
