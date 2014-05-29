@@ -122,6 +122,8 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
                                 }
                                 Bundle nExtras = (Bundle) getObjectField(notification, "extras");
                                 notification.flags = bundle.getInt(EXTRA_NOTIFICATION_FLAGS);
+                                if (nExtras == null)
+                                    nExtras = new Bundle();
                                 nExtras.putInt(EXTRA_PINNOTIF_MARKER, 0);
 
                                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
@@ -152,7 +154,7 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
 
                         Notification n = (Notification) param.args[NOTIFICATION_INDEX];
                         Bundle nExtras = (Bundle) getObjectField(n, "extras");
-                        if (nExtras.containsKey(EXTRA_PINNOTIF_MARKER))
+                        if (nExtras != null && nExtras.containsKey(EXTRA_PINNOTIF_MARKER))
                             return;
 
                         int index;
