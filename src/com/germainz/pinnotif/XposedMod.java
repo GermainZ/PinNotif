@@ -15,6 +15,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.PopupMenu;
 
+import java.lang.reflect.InvocationTargetException;
 import java.util.ArrayList;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
@@ -29,6 +30,7 @@ import static de.robv.android.xposed.XposedHelpers.callMethod;
 import static de.robv.android.xposed.XposedHelpers.findAndHookConstructor;
 import static de.robv.android.xposed.XposedHelpers.findAndHookMethod;
 import static de.robv.android.xposed.XposedHelpers.findClass;
+import static de.robv.android.xposed.XposedHelpers.findMethodExact;
 import static de.robv.android.xposed.XposedHelpers.getIntField;
 import static de.robv.android.xposed.XposedHelpers.getObjectField;
 import static de.robv.android.xposed.XposedHelpers.setObjectField;
@@ -81,7 +83,7 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
     }
 
     private void loadNotifManagerServiceHooks(LoadPackageParam loadPackageParam) {
-        Class notificationManagerServiceClass = findClass("com.android.server.NotificationManagerService",
+        final Class notificationManagerServiceClass = findClass("com.android.server.NotificationManagerService",
                 loadPackageParam.classLoader);
         findAndHookConstructor(notificationManagerServiceClass, Context.class,
                 "com.android.server.StatusBarManagerService", "com.android.server.LightsService",
@@ -99,7 +101,8 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
                                 int userId = 0;
                                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1)
                                     userId = bundle.getInt("userId");
-                                int index = getNotificationIndex(param.thisObject, pkg, tag, id, userId);
+                                int index = getNotificationIndex(notificationManagerServiceClass,
+                                        param.thisObject, pkg, tag, id, userId);
 
                                 // Each notification is associated with a package, and has an id.
                                 // To update a certain notification, we send updated notification
@@ -152,8 +155,8 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
                         Object userId = null;
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1)
                             userId = param.args[USERID_INDEX];
-                        int index = getNotificationIndex(param.thisObject, param.args[PKG_INDEX], param.args[TAG_INDEX],
-                                param.args[ID_INDEX], userId);
+                        int index = getNotificationIndex(notificationManagerServiceClass, param.thisObject,
+                                param.args[PKG_INDEX], param.args[TAG_INDEX], param.args[ID_INDEX], userId);
 
                         // This is not a new notification, but an update. Check if we had set custom
                         // flags, and if so, restore them.
@@ -161,7 +164,9 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
                             Notification oldSbnNotification = getNotification(param.thisObject, index);
                             Bundle oldSbnExtras = (Bundle) getObjectField(oldSbnNotification, "extras");
                             // If the marker is set, then we previously set custom flags… restore them
-                            if (oldSbnExtras.containsKey(EXTRA_PINNOTIF_MARKER)) {
+                            if (oldSbnExtras != null && oldSbnExtras.containsKey(EXTRA_PINNOTIF_MARKER)) {
+                                if (nExtras == null)
+                                    nExtras = new Bundle();
                                 nExtras.putInt(EXTRA_PINNOTIF_MARKER, 0);
                                 if (isClearable(oldSbnNotification))
                                     n.flags &= ~Notification.FLAG_NO_CLEAR;
@@ -222,7 +227,10 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
                                                 );
                                                 intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                                                 mContext.startActivity(intent);
-                                                callMethod(param.thisObject, "animateCollapsePanels", 0);
+                                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1)
+                                                    callMethod(param.thisObject, "animateCollapsePanels", 0);
+                                                else
+                                                    callMethod(param.thisObject, "animateCollapse", 0);
                                             } else if (item.getTitle().equals(TEXT_PIN)) {
                                                 item.setTitle(TEXT_UNPIN);
                                                 n.flags |= Notification.FLAG_NO_CLEAR;
@@ -286,11 +294,18 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
         return (notification.flags & Notification.FLAG_ONGOING_EVENT) != 0;
     }
 
-    public static int getNotificationIndex(Object object, Object pkg, Object tag, Object id, Object userId) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1)
-            return (Integer) callMethod(object, "indexOfNotificationLocked", pkg, tag, id, userId);
-        else
-            return (Integer) callMethod(object, "indexOfNotificationLocked", pkg, tag, id);
+    public static int getNotificationIndex(Class clazz, Object object, Object pkg, Object tag, Object id, Object userId) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1)
+                return (Integer) findMethodExact(clazz, "indexOfNotificationLocked", String.class, String.class, int.class, int.class).invoke(object, pkg, tag, id, userId);
+            else
+                return (Integer) findMethodExact(clazz, "indexOfNotificationLocked", String.class, String.class, int.class).invoke(object, pkg, tag, id);
+        } catch (IllegalAccessException e) {
+            e.printStackTrace();
+        } catch (InvocationTargetException e) {
+            e.printStackTrace();
+        }
+        return 0;
     }
 
     public static Notification getNotification(Object object, int index) {
@@ -303,5 +318,6 @@ public class XposedMod implements IXposedHookLoadPackage, IXposedHookZygoteInit 
             return (Notification) getObjectField(notificationRecord, "notification");
         }
     }
+
 }
 
