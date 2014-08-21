@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PinNotif</string>
+    <string name="xposed_description">Pripnite si dôležité oznámenia, aby sa zabránilo ich nechcenému vymazaniu</string>
+    <string name="text_pin">Pripnúť</string>
+    <string name="text_unpin">Odopnúť</string>
+    <string name="text_app_info">Informácie o aplikácii</string>
+</resources>
