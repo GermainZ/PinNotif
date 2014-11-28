@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">PinNotif</string>
-    <string name="xposed_description">Pin important notifications to avoid clearing them by mistake</string>
-    <string name="text_pin">Pin</string>
-    <string name="text_unpin">Unpin</string>
-    <string name="text_app_info">App Info</string>
+    <string name="xposed_description">Закрепляет важные уведомления, чтобы случайно не удалить их</string>
+    <string name="text_pin">Закрепить</string>
+    <string name="text_unpin">Открепить</string>
+    <string name="text_app_info">Сведения о приложении</string>
 </resources>
