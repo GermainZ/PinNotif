@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PinNotif</string>
+    <string name="xposed_description">Blocca le notifiche importanti per evitare che vengano eliminate accidentalmente</string>
+    <string name="text_pin">Blocca</string>
+    <string name="text_unpin">Sblocca</string>
+    <string name="text_app_info">Informazioni applicazione</string>
+</resources>
